@@ -1,0 +1,270 @@
+# Data Exploration
+
+## Loading the Data
+
+First, I'll load the necessary packages and read in the data:
+
+# Load the fpp3 package suite for forecasting
+library(fpp3)
+
+
+
+# Read the CSV file and convert to a time series object (tsibble)
+baregg <- read.csv("BareggTunnel.csv") |>
+  mutate(Day = dmy(Day)) |>  # Parse the date column
+  as_tsibble(index = Day)     # Tell R this is time series data
+
+# Look at the first few rows
+head(baregg)
+
+# Get basic statistics
+summary(baregg$Number.of.vehicles)
+
+
+## Visualizing the Time Series
+
+autoplot(baregg, Number.of.vehicles) +
+  labs(title = "Baregg Tunnel Daily Traffic (Nov 2003 - Nov 2005)",
+       y = "Number of Vehicles", 
+       x = "Date") +
+  theme_minimal()
+
+
+baregg |>
+  gg_subseries(Number.of.vehicles, period = "week") +
+  labs(title = "Traffic Patterns by Day of Week",
+       y = "Number of Vehicles") +
+  theme_minimal()
+
+
+
+## The Two Models I'm Comparing
+
+### Model 1: Naïve Forecast
+
+The Naïve method is the simplest possible forecast. It just says "tomorrow will be like today." More formally:
+
+$$\hat{y}_{t+h} = y_t$$
+
+
+### Model 2: Linear Regression (TSLM)
+
+This model tries to capture the patterns I observed:
+
+$$y_t = \beta_0 + \beta_1 \times \text{trend} + \sum \beta_i \times \text{DayOfWeek}_i + \varepsilon_t$$
+
+
+## Splitting the Data
+
+# Split into training and validation sets
+train <- baregg |>
+  filter(Day < ymd("2005-07-01"))
+
+valid <- baregg |>
+  filter(Day >= ymd("2005-07-01"))
+
+cat("Training observations:", nrow(train), "\n")
+cat("Validation observations:", nrow(valid), "\n")
+
+
+# Fitting the Models
+
+## Step 3: Train Both Models
+
+### Naïve Model
+
+
+# Fit the Naïve forecast on training data
+fit_naive <- train |>
+  model(Naive = NAIVE(Number.of.vehicles))
+
+fit_naive
+
+
+### Linear Regression Model
+
+
+# Fit linear regression with trend and weekly seasonality
+fit_lm <- train |>
+  model(
+    LinReg = TSLM(Number.of.vehicles ~ 
+                    trend() + season("week"))
+  )
+
+# Look at the coefficients
+report(fit_lm)
+
+
+### Generate Forecasts
+
+# Generate forecasts for the validation period
+fc_naive <- fit_naive |>
+  forecast(new_data = valid)
+
+fc_lm <- fit_lm |>
+  forecast(new_data = valid)
+
+
+fc_naive |>
+  autoplot(baregg, level = NULL) +
+  labs(title = "Naïve Forecast vs Actual Traffic",
+       subtitle = "Validation Period: July - November 2005",
+       y = "Number of Vehicles", 
+       x = "Date") +
+  theme_minimal()
+
+
+
+
+### Visualize the Linear Regression Forecast
+
+fc_lm |>
+  autoplot(baregg, level = NULL) +
+  labs(title = "Linear Regression Forecast vs Actual Traffic",
+       subtitle = "Validation Period: July - November 2005",
+       y = "Number of Vehicles", 
+       x = "Date") +
+  theme_minimal()
+
+
+### Side-by-Side Comparison
+
+# Combine forecasts for comparison
+both_forecasts <- bind_rows(
+  fc_naive |> mutate(Model = "Naïve"),
+  fc_lm |> mutate(Model = "Linear Regression")
+)
+
+# Plot both
+both_forecasts |>
+  autoplot(baregg, level = NULL) +
+  facet_wrap(~ Model, ncol = 1) +
+  labs(title = "Comparing Both Forecast Methods",
+       y = "Number of Vehicles", 
+       x = "Date") +
+  theme_minimal()
+
+### Calculate Accuracy Metrics
+
+
+# Get accuracy metrics for both models
+acc_naive <- accuracy(fc_naive, baregg)
+acc_lm <- accuracy(fc_lm, baregg)
+
+# Combine into one table for comparison
+accuracy_table <- bind_rows(
+  acc_naive |> mutate(Model = "Naïve"),
+  acc_lm |> mutate(Model = "Linear Regression")
+) |>
+  select(Model, ME, RMSE, MAE, MAPE, MASE, ACF1)
+
+accuracy_table
+
+# Calculate the scaling factor (MAE of Naïve forecast on training data)
+mae_naive_train <- mean(abs(diff(train$Number.of.vehicles)))
+
+# Calculate MASE for both models
+mase_naive <- mean(abs(valid$Number.of.vehicles - fc_naive$.mean)) / mae_naive_train
+mase_linreg <- mean(abs(valid$Number.of.vehicles - fc_lm$.mean)) / mae_naive_train
+
+cat("Manual MASE Calculation:\n")
+cat("------------------------\n")
+cat("MASE for Naïve:     ", round(mase_naive, 3), "\n")
+cat("MASE for Lin Reg:   ", round(mase_linreg, 3), "\n")
+cat("\nInterpretation:\n")
+cat("MASE < 1 means the forecast is better than the Naïve benchmark\n")
+cat("MASE = 1 means it's equal to Naïve\n")
+cat("MASE > 1 means it's worse than Naïve\n")
+
+
+## Step 5: Diagnosing Forecast Errors
+
+Now I need to check if my forecast errors look random or if there are patterns I'm missing.
+
+### Diagnostic Plots for Naïve Model
+
+# Three diagnostic plots in one
+fit_naive |>
+  gg_tsresiduals() +
+  labs(title = "Naïve Model: Residual Diagnostics")
+
+### Diagnostic Plots for Linear Regression
+
+
+fit_lm |>
+  gg_tsresiduals() +
+  labs(title = "Linear Regression Model: Residual Diagnostics")
+
+This suggests the Linear Regression model is capturing most of the systematic patterns.
+
+### Looking at Forecast Errors Over Time
+
+# Calculate errors for the validation period
+errors_naive <- valid$Number.of.vehicles - fc_naive$.mean
+errors_lm <- valid$Number.of.vehicles - fc_lm$.mean
+
+# Create a dataframe for plotting
+error_df <- tibble(
+  Day = valid$Day,
+  Naive_Error = errors_naive,
+  LinReg_Error = errors_lm
+)
+
+# Plot errors over time
+error_df |>
+  pivot_longer(cols = c(Naive_Error, LinReg_Error), 
+               names_to = "Model", values_to = "Error") |>
+  mutate(Model = recode(Model, 
+                        "Naive_Error" = "Naïve",
+                        "LinReg_Error" = "Linear Regression")) |>
+  ggplot(aes(x = Day, y = Error, color = Model)) +
+  geom_line() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "Forecast Errors Over Time",
+       y = "Error (Actual - Forecast)",
+       x = "Date") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+### Error Distributions
+
+error_df |>
+  pivot_longer(cols = c(Naive_Error, LinReg_Error), 
+               names_to = "Model", values_to = "Error") |>
+  mutate(Model = recode(Model, 
+                        "Naive_Error" = "Naïve",
+                        "LinReg_Error" = "Linear Regression")) |>
+  ggplot(aes(x = Error, fill = Model)) +
+  geom_histogram(bins = 20, alpha = 0.7) +
+  facet_wrap(~ Model, ncol = 1) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Distribution of Forecast Errors",
+       x = "Error",
+       y = "Count") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+par(mfrow = c(2, 1))
+acf(errors_naive, main = "ACF of Naïve Model Errors", lag.max = 20)
+acf(errors_lm, main = "ACF of Linear Regression Errors", lag.max = 20)
+par(mfrow = c(1, 1))
+
+cat("Mean Error Analysis:\n")
+cat("--------------------\n")
+cat("Naïve ME:          ", round(acc_naive$ME, 2), "\n")
+cat("Linear Regression ME:", round(acc_lm$ME, 2), "\n\n")
+
+cat("Interpretation:\n")
+cat("• ME close to 0 = unbiased (errors average out)\n")
+cat("• ME > 0 = over-forecasting on average\n")
+cat("• ME < 0 = under-forecasting on average\n")
+
+cat("Error Distribution Statistics:\n")
+cat("-------------------------------\n")
+cat("Naïve errors:\n")
+cat("  Mean:   ", round(mean(errors_naive), 2), "\n")
+cat("  Median: ", round(median(errors_naive), 2), "\n\n")
+
+cat("Linear Regression errors:\n")
+cat("  Mean:   ", round(mean(errors_lm), 2), "\n")
+cat("  Median: ", round(median(errors_lm), 2), "\n")
